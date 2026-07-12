@@ -6,7 +6,7 @@ $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concaten
 $notifySoundPath = "C:\Users\space\Desktop\Matrix Chat\ReceivedFiles\Windows Proximity Notification.wav"
 
 # --- Auto-update config ---
-$scriptVersion = "2.3.0"
+$scriptVersion = "2.4.0"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/server.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
@@ -18,7 +18,16 @@ public static extern IntPtr GetForegroundWindow();
 public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
 [DllImport("user32.dll")]
 public static extern int GetWindowTextLength(IntPtr hWnd);
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")]
+public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(IntPtr hWnd);
 "@
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 $myWindowTitle = "MatrixChat-Dale-$PID"
 $Host.UI.RawUI.WindowTitle = $myWindowTitle
@@ -30,6 +39,39 @@ function Test-IsWindowFocused {
     $sb = New-Object System.Text.StringBuilder ($len + 1)
     [ConsoleUtils.Win32]::GetWindowText($hwnd, $sb, $sb.Capacity) | Out-Null
     return $sb.ToString() -eq $myWindowTitle
+}
+
+# --- System tray support ---
+$global:trayIcon = New-Object System.Windows.Forms.NotifyIcon
+$global:trayIcon.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon([System.Diagnostics.Process]::GetCurrentProcess().Path)
+$global:trayIcon.Text = "Matrix Chat - $myNick"
+$global:trayIcon.Visible = $false
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$menuShow = $trayMenu.Items.Add("Show Matrix Chat")
+$menuExit = $trayMenu.Items.Add("Exit")
+$global:trayIcon.ContextMenuStrip = $trayMenu
+
+$global:trayIcon.add_DoubleClick({ Restore-Console })
+$menuShow.add_Click({ Restore-Console })
+$menuExit.add_Click({
+    $global:trayIcon.Visible = $false
+    $global:trayIcon.Dispose()
+    Stop-Process -Id $PID
+})
+
+function Hide-ToTray {
+    $hwnd = [ConsoleUtils.Win32]::GetConsoleWindow()
+    [ConsoleUtils.Win32]::ShowWindow($hwnd, 0) | Out-Null   # SW_HIDE
+    $global:trayIcon.Visible = $true
+    $global:trayIcon.ShowBalloonTip(1500, "Matrix Chat", "Still running - double-click the tray icon to reopen.", [System.Windows.Forms.ToolTipIcon]::Info)
+}
+
+function Restore-Console {
+    $hwnd = [ConsoleUtils.Win32]::GetConsoleWindow()
+    [ConsoleUtils.Win32]::ShowWindow($hwnd, 5) | Out-Null   # SW_SHOW
+    [ConsoleUtils.Win32]::SetForegroundWindow($hwnd) | Out-Null
+    $global:trayIcon.Visible = $false
 }
 
 function Play-Notify {
@@ -149,6 +191,7 @@ function Show-Help {
     write-host "  /shout <msg>     - send a loud message" -ForegroundColor DarkGray
     write-host "  /sendfile <path> - send a file (under 15MB)" -ForegroundColor DarkGray
     write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
+    write-host "  /tray            - minimize to system tray" -ForegroundColor DarkGray
     write-host "  /help            - show this list" -ForegroundColor DarkGray
     write-host "  exit             - quit chat" -ForegroundColor DarkGray
     write-host ""
@@ -215,6 +258,8 @@ try {
     $recvLastShownPct = -1
 
     while ($client.Connected) {
+
+        [System.Windows.Forms.Application]::DoEvents()
 
         # Branch A: Poll Incoming Network Packets
         if ($stream.DataAvailable) {
@@ -320,6 +365,8 @@ try {
                         }
                     } elseif ($currentInput -eq "/help") {
                         Show-Help
+                    } elseif ($currentInput -eq "/tray") {
+                        Hide-ToTray
                     } elseif ($currentInput -eq "/clear") {
                         Clear-Host
                         write-host "==================================================" -ForegroundColor Green
