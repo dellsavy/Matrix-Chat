@@ -6,7 +6,7 @@ $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concaten
 $notifySoundPath = "C:\Users\space\Desktop\Matrix Chat\ReceivedFiles\Windows Proximity Notification.wav"
 
 # --- Auto-update config ---
-$scriptVersion = "2.2.1"
+$scriptVersion = "2.3.0"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/server.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
@@ -43,6 +43,24 @@ function Play-Notify {
         }
     } else {
         [System.Media.SystemSounds]::Asterisk.Play()
+    }
+}
+
+# Extensions that auto-open on receive - images, video, audio only.
+# Anything else (zip, exe, docx, etc.) is left alone for safety/sanity.
+$autoOpenExtensions = @(".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", `
+                        ".mp4", ".mov", ".mkv", ".avi", ".webm", `
+                        ".mp3", ".wav", ".flac", ".ogg", ".m4a")
+
+function Open-IfMedia {
+    param([string]$path)
+    try {
+        $ext = [IO.Path]::GetExtension($path).ToLower()
+        if ($autoOpenExtensions -contains $ext) {
+            Start-Process -FilePath $path
+        }
+    } catch {
+        write-host "* Couldn't auto-open '$path': $($_.Exception.Message) *" -ForegroundColor DarkYellow
     }
 }
 
@@ -233,6 +251,7 @@ try {
                             [IO.File]::WriteAllBytes($savePath, $allBytes)
                             Play-Notify
                             write-host "* Received file '$recvFileName' -> saved to $savePath *" -ForegroundColor Green
+                            Open-IfMedia $savePath
                         } catch {
                             write-host "* Failed to save file: $($_.Exception.Message) *" -ForegroundColor Red
                         }
