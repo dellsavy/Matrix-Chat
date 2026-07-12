@@ -1,1 +1,1 @@
-2.2.1|Initial versioned release
+2.3.0|Auto-opens images, videos, and audio after receiving them
