@@ -1,1 +1,1 @@
-2.5.2|Added /ai command - ask Gemini anything right in chat, answer shows for both of you. HOLEEE
+2.7.0|Added chat-history context to /ai so Gemini can follow the conversation. ILIKEBOYShehe
