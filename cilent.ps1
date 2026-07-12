@@ -1,0 +1,344 @@
+$serverIP = "26.100.42.201" # Friend's VPN IP
+$port = 9999
+$myNick = "Xore"
+$filesDir = Join-Path $PSScriptRoot "ReceivedFiles"
+$maxFileSize = 15MB
+$chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concatenate cleanly
+$notifySoundPath = "C:\Users\Administrator\Desktop\Code shit\Chat w Dale's computer\Matrix Chat\V2\ReceivedFiles\Windows Proximity Notification.wav"
+
+# --- Auto-update config ---
+$scriptVersion = "2.2.1"
+$versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
+$scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/client.ps1"
+$repoUrl = "https://github.com/dellsavy/Matrix-Chat"
+
+Add-Type -Name Win32 -Namespace ConsoleUtils -MemberDefinition @"
+[DllImport("user32.dll")]
+public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")]
+public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+[DllImport("user32.dll")]
+public static extern int GetWindowTextLength(IntPtr hWnd);
+"@
+
+$myWindowTitle = "MatrixChat-Xore-$PID"
+$Host.UI.RawUI.WindowTitle = $myWindowTitle
+
+function Test-IsWindowFocused {
+    $hwnd = [ConsoleUtils.Win32]::GetForegroundWindow()
+    $len = [ConsoleUtils.Win32]::GetWindowTextLength($hwnd)
+    if ($len -eq 0) { return $false }
+    $sb = New-Object System.Text.StringBuilder ($len + 1)
+    [ConsoleUtils.Win32]::GetWindowText($hwnd, $sb, $sb.Capacity) | Out-Null
+    return $sb.ToString() -eq $myWindowTitle
+}
+
+function Play-Notify {
+    if (Test-IsWindowFocused) { return }
+    if ($notifySoundPath -ne "" -and (Test-Path $notifySoundPath)) {
+        try {
+            $player = New-Object System.Media.SoundPlayer($notifySoundPath)
+            $player.Play()
+        } catch {
+            [System.Media.SystemSounds]::Asterisk.Play()
+        }
+    } else {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+}
+
+function Auto-Update {
+    try {
+        $remote = Invoke-RestMethod -Uri $versionCheckUrl -TimeoutSec 5
+        $line = ($remote -split "`n")[0].Trim()
+        $parts = $line -split '\|', 2
+        $remoteVersion = $parts[0].Trim()
+        $note = if ($parts.Length -gt 1) { $parts[1].Trim() } else { "" }
+
+        if (-not $remoteVersion -or $remoteVersion -eq $scriptVersion) { return $false }
+
+        write-host "==================================================" -ForegroundColor Magenta
+        write-host "  UPDATE FOUND: v$remoteVersion (you're on v$scriptVersion)" -ForegroundColor Magenta
+        if ($note) { write-host "  Changes: $note" -ForegroundColor Magenta }
+        write-host "  Downloading update..." -ForegroundColor Magenta
+        write-host "==================================================" -ForegroundColor Magenta
+
+        $newCode = Invoke-RestMethod -Uri $scriptDownloadUrl -TimeoutSec 10
+        if (-not $newCode -or $newCode.Length -lt 100) {
+            write-host "* Update download looked empty/broken, skipping. *" -ForegroundColor Red
+            return $false
+        }
+
+        $selfPath = $PSCommandPath
+        $backupPath = "$selfPath.bak"
+        Copy-Item -Path $selfPath -Destination $backupPath -Force
+        Set-Content -Path $selfPath -Value $newCode -Encoding UTF8
+
+        write-host "* Updated to v$remoteVersion. Restarting... *" -ForegroundColor Green
+        Start-Sleep -Seconds 1
+
+        Start-Process powershell -ArgumentList "-NoExit", "-File", "`"$selfPath`""
+        return $true
+    } catch {
+        write-host "* Update check failed, continuing on current version. *" -ForegroundColor DarkYellow
+        return $false
+    }
+}
+
+Clear-Host
+write-host "==================================================" -ForegroundColor Cyan
+write-host "=== CONNECTING TO DALE AT $serverIP... ===" -ForegroundColor Cyan
+write-host "==================================================" -ForegroundColor Cyan
+if (Auto-Update) { exit }
+
+function Get-Timestamp { (Get-Date).ToString("HH:mm") }
+function Get-Prefix { "[$myNick]: " }
+
+function Clear-CurrentLine {
+    $width = $Host.UI.RawUI.BufferSize.Width
+    write-host ("`r" + (" " * ($width - 1)) + "`r") -NoNewline
+}
+
+function Redraw-InputLine {
+    param($text, $statusText)
+    $width = $Host.UI.RawUI.BufferSize.Width
+    $prefix = Get-Prefix
+    $suffix = ""
+    if ($statusText) { $suffix = "  ($statusText)" }
+    $maxInputLen = [Math]::Max(0, $width - $prefix.Length - $suffix.Length - 1)
+    $displayText = $text
+    if ($displayText.Length -gt $maxInputLen) {
+        $displayText = $displayText.Substring($displayText.Length - $maxInputLen)
+    }
+    Clear-CurrentLine
+    write-host "$prefix$displayText$suffix" -NoNewline
+}
+
+function Write-ProgressLine {
+    param($label, $pct)
+    $width = $Host.UI.RawUI.BufferSize.Width
+    $barWidth = 20
+    $filled = [Math]::Floor($barWidth * $pct / 100.0)
+    $bar = ("#" * $filled) + ("-" * ($barWidth - $filled))
+    $text = "$label [$bar] $pct%"
+    if ($text.Length -gt ($width - 1)) { $text = $text.Substring(0, $width - 1) }
+    write-host ("`r" + $text.PadRight($width - 1)) -NoNewline -ForegroundColor DarkGray
+}
+
+function Show-Help {
+    write-host ""
+    write-host "Commands:" -ForegroundColor DarkGray
+    write-host "  /nick <name>     - change your display name" -ForegroundColor DarkGray
+    write-host "  /shout <msg>     - send a loud message" -ForegroundColor DarkGray
+    write-host "  /sendfile <path> - send a file (under 15MB)" -ForegroundColor DarkGray
+    write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
+    write-host "  /help            - show this list" -ForegroundColor DarkGray
+    write-host "  exit             - quit chat" -ForegroundColor DarkGray
+    write-host ""
+}
+
+function Send-FileChunked {
+    param($writer, $path)
+    $bytes = [IO.File]::ReadAllBytes($path)
+    if ($bytes.Length -gt $maxFileSize) {
+        write-host "* File too large (max 15MB) *" -ForegroundColor Red
+        return
+    }
+    $fname = [IO.Path]::GetFileName($path)
+    $totalChunks = [Math]::Ceiling($bytes.Length / [double]$chunkSize)
+    $writer.WriteLine("FILESTART|$fname|$totalChunks")
+
+    write-host "Sending $fname..."
+    $lastShownPct = -1
+
+    for ($i = 0; $i -lt $totalChunks; $i++) {
+        $offset = $i * $chunkSize
+        $len = [Math]::Min($chunkSize, $bytes.Length - $offset)
+        $chunkBytes = New-Object byte[] $len
+        [Array]::Copy($bytes, $offset, $chunkBytes, 0, $len)
+        $b64 = [Convert]::ToBase64String($chunkBytes)
+        $writer.WriteLine("FILECHUNK|$i|$b64")
+        $pct = [Math]::Floor((($i + 1) / [double]$totalChunks) * 100)
+        if ($pct -ne $lastShownPct) {
+            try { Write-ProgressLine "Sending $fname" $pct } catch { }
+            $lastShownPct = $pct
+        }
+    }
+    $writer.WriteLine("FILEEND|$fname")
+    write-host ""
+    write-host "* File sent: $fname *" -ForegroundColor Green
+}
+
+try {
+    $client = [System.Net.Sockets.TcpClient]::new($serverIP, $port)
+    $stream = $client.GetStream()
+    $writer = [System.IO.StreamWriter]::new($stream)
+    $writer.AutoFlush = $true
+    $reader = [System.IO.StreamReader]::new($stream)
+
+    Clear-Host
+    write-host "==================================================" -ForegroundColor Green
+    write-host "=== DALE SUCCESSFULLY CONNECTED! CHAT ACTIVE   ===" -ForegroundColor Green
+    write-host "==================================================" -ForegroundColor Green
+    write-host "Start typing! Type /help to see commands.`n"
+
+    $currentInput = ""
+    $typingActive = $false
+    $statusText = $null
+    Redraw-InputLine $currentInput $statusText
+
+    # File receive state
+    $recvFileName = $null
+    $recvTotalChunks = 0
+    $recvChunkCount = 0
+    $recvSB = $null
+    $recvLastShownPct = -1
+
+    while ($client.Connected) {
+
+        # Branch A: Poll Incoming Network Packets
+        if ($stream.DataAvailable) {
+            $line = $reader.ReadLine()
+            if ($line -ne $null) {
+                $parts = $line -split '\|', 4
+                $type = $parts[0]
+
+                if ($type -eq "FILESTART") {
+                    Clear-CurrentLine
+                    $recvFileName = $parts[1]
+                    $recvTotalChunks = [int]$parts[2]
+                    $recvChunkCount = 0
+                    $recvSB = New-Object System.Text.StringBuilder
+                    $recvLastShownPct = -1
+                    write-host "Receiving $recvFileName..."
+                } elseif ($type -eq "FILECHUNK") {
+                    if ($recvSB -ne $null) {
+                        $recvSB.Append($parts[2]) | Out-Null
+                        $recvChunkCount++
+                        $pct = [Math]::Floor(($recvChunkCount / [double]$recvTotalChunks) * 100)
+                        if ($pct -ne $recvLastShownPct) {
+                            try { Write-ProgressLine "Receiving $recvFileName" $pct } catch { }
+                            $recvLastShownPct = $pct
+                        }
+                    }
+                } elseif ($type -eq "FILEEND") {
+                    if ($recvSB -ne $null) {
+                        write-host ""
+                        try {
+                            if (!(Test-Path $filesDir)) { New-Item -ItemType Directory -Path $filesDir | Out-Null }
+                            $allBytes = [Convert]::FromBase64String($recvSB.ToString())
+                            $savePath = Join-Path $filesDir $recvFileName
+                            [IO.File]::WriteAllBytes($savePath, $allBytes)
+                            Play-Notify
+                            write-host "* Received file '$recvFileName' -> saved to $savePath *" -ForegroundColor Green
+                        } catch {
+                            write-host "* Failed to save file: $($_.Exception.Message) *" -ForegroundColor Red
+                        }
+                        $recvFileName = $null; $recvSB = $null
+                    }
+                    $statusText = $null
+                    Redraw-InputLine $currentInput $statusText
+                } else {
+                    Clear-CurrentLine
+                    switch ($type) {
+                        "MSG" {
+                            $ts = $parts[1]; $nick = $parts[2]; $text = $parts[3]
+                            if ($text.StartsWith("SHOUT:")) {
+                                Play-Notify
+                                write-host "[$ts] [$nick]: $($text.Substring(6).ToUpper())" -ForegroundColor Red
+                            } else {
+                                Play-Notify
+                                write-host "[$ts] [$nick]: $text" -ForegroundColor Cyan
+                            }
+                            $statusText = $null
+                        }
+                        "TYPING" {
+                            $nick = $parts[1]; $state = $parts[2]
+                            if ($state -eq "1") { $statusText = "$nick is typing..." } else { $statusText = $null }
+                        }
+                        "SYS" {
+                            write-host "* $($parts[1]) *" -ForegroundColor DarkYellow
+                            $statusText = $null
+                        }
+                    }
+                    Redraw-InputLine $currentInput $statusText
+                }
+            }
+        }
+
+        # Branch B: Poll Keyboard State
+        if ([System.Console]::KeyAvailable) {
+            $keyInfo = [System.Console]::ReadKey($true)
+
+            if ($keyInfo.Key -eq [System.ConsoleKey]::Enter) {
+                if ($currentInput -eq "exit") { break }
+
+                if ($currentInput -ne "") {
+                    if ($typingActive) { $writer.WriteLine("TYPING|$myNick|0"); $typingActive = $false }
+
+                    Clear-CurrentLine
+
+                    if ($currentInput.StartsWith("/nick ")) {
+                        $newNick = $currentInput.Substring(6).Trim()
+                        if ($newNick -ne "") {
+                            $old = $myNick
+                            $myNick = $newNick
+                            $writer.WriteLine("SYS|$old changed their name to $myNick")
+                            write-host "* You changed your name to $myNick *" -ForegroundColor DarkYellow
+                        }
+                    } elseif ($currentInput.StartsWith("/shout ")) {
+                        $text = $currentInput.Substring(7)
+                        $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|SHOUT:$text")
+                        write-host "[$(Get-Timestamp)] [$myNick]: $($text.ToUpper())" -ForegroundColor Red
+                    } elseif ($currentInput.StartsWith("/sendfile ")) {
+                        $path = $currentInput.Substring(10).Trim().Trim('"')
+                        if (Test-Path $path -PathType Leaf) {
+                            Send-FileChunked $writer $path
+                        } else {
+                            write-host "* File not found: $path *" -ForegroundColor Red
+                        }
+                    } elseif ($currentInput -eq "/help") {
+                        Show-Help
+                    } elseif ($currentInput -eq "/clear") {
+                        Clear-Host
+                        write-host "==================================================" -ForegroundColor Green
+                        write-host "===              CHAT ACTIVE                   ===" -ForegroundColor Green
+                        write-host "==================================================" -ForegroundColor Green
+                    } else {
+                        $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|$currentInput")
+                        write-host "[$(Get-Timestamp)] [$myNick]: $currentInput" -ForegroundColor Green
+                    }
+
+                    $currentInput = ""
+                    Redraw-InputLine $currentInput $statusText
+                }
+            } elseif ($keyInfo.Key -eq [System.ConsoleKey]::Backspace) {
+                if ($currentInput.Length -gt 0) {
+                    $currentInput = $currentInput.SubString(0, $currentInput.Length - 1)
+                    if ($currentInput.Length -eq 0 -and $typingActive) {
+                        $writer.WriteLine("TYPING|$myNick|0")
+                        $typingActive = $false
+                    }
+                    Redraw-InputLine $currentInput $statusText
+                }
+            } else {
+                $wasEmpty = ($currentInput.Length -eq 0)
+                $currentInput += $keyInfo.KeyChar
+                if ($wasEmpty -and -not $typingActive) {
+                    $writer.WriteLine("TYPING|$myNick|1")
+                    $typingActive = $true
+                }
+                Redraw-InputLine $currentInput $statusText
+            }
+        }
+
+        Start-Sleep -Milliseconds 10
+    }
+} catch {
+    write-host "`n[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    write-host "(If this happened right after connecting, your friend's side likely closed or crashed.)" -ForegroundColor Red
+    write-host "(If this happened immediately, check the server is running and your VPN is active.)" -ForegroundColor Red
+    Start-Sleep -Seconds 15
+}
+
+if ($client) { $client.Close() }
