@@ -1,1 +1,1 @@
-2.3.0|Auto-opens images, videos, and audio after receiving them
+2.4.0|Added /tray command to minimize to system tray
