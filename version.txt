@@ -1,1 +1,1 @@
-2.4.0|Added /tray command to minimize to system tray
+2.5.0|Fixed update banner to show after restart; added /playmusic, /pause, /stop for shared music. I don't know if this is convenient bro lol XD HAHAHA.
