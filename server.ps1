@@ -4,6 +4,7 @@ $filesDir = Join-Path $PSScriptRoot "ReceivedFiles"
 $maxFileSize = 15MB
 $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concatenate cleanly
 $notifySoundPath = "C:\Users\space\Desktop\Matrix Chat\ReceivedFiles\Windows Proximity Notification.wav"
+$geminiApiKey = "AQ.Ab8RN6Ixp05_VGmAY2zcFjgPWXyMubTOPOSm_noZ-taArQiKbg"
 
 # --- Auto-update config ---
 $scriptVersion = "2.5.1"
@@ -131,6 +132,35 @@ function Stop-MusicLocal {
     try { $global:musicPlayer.Stop() } catch { }
 }
 
+function Invoke-AI {
+    param($question, $historyList)
+    if ($geminiApiKey -eq "") {
+        write-host "* Set your Gemini API key in the script first (`$geminiApiKey) *" -ForegroundColor Red
+        return $null
+    }
+    try {
+        $historyText = ($historyList -join "`n")
+        $prompt = "Here is the recent chat conversation for context:`n$historyText`n`nNow answer this question, keeping your answer concise (a few sentences unless asked for more):`n$question"
+        $uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$geminiApiKey"
+        $body = @{
+            contents = @(@{ parts = @(@{ text = $prompt }) })
+        } | ConvertTo-Json -Depth 10
+        $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $body
+        $text = $response.candidates[0].content.parts[0].text
+        $text = $text -replace "`r`n", " " -replace "`n", " "
+        return $text
+    } catch {
+        write-host "* AI request failed: $($_.Exception.Message) *" -ForegroundColor Red
+        return $null
+    }
+}
+
+function Add-History {
+    param($historyList, $maxLen, $entry)
+    [void]$historyList.Add($entry)
+    while ($historyList.Count -gt $maxLen) { $historyList.RemoveAt(0) }
+}
+
 function Auto-Update {
     try {
         $remote = Invoke-RestMethod -Uri $versionCheckUrl -TimeoutSec 5
@@ -244,6 +274,7 @@ function Show-Help {
     write-host "  /playmusic <path>- play a song for both of you (send it first)" -ForegroundColor DarkGray
     write-host "  /pause           - pause the shared music" -ForegroundColor DarkGray
     write-host "  /stop            - stop the shared music" -ForegroundColor DarkGray
+    write-host "  /ai <question>   - ask the AI, answer shows for both of you" -ForegroundColor DarkGray
     write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
     write-host "  /tray            - minimize to system tray" -ForegroundColor DarkGray
     write-host "  /help            - show this list" -ForegroundColor DarkGray
@@ -304,6 +335,9 @@ try {
     $typingActive = $false
     $statusText = $null
     Redraw-InputLine $currentInput $statusText
+
+    $chatHistory = New-Object System.Collections.ArrayList
+    $maxHistory = 30
 
     # File receive state
     $recvFileName = $null
@@ -387,10 +421,13 @@ try {
                             $ts = $parts[1]; $nick = $parts[2]; $text = $parts[3]
                             if ($text.StartsWith("SHOUT:")) {
                                 Play-Notify
-                                write-host "[$ts] [$nick]: $($text.Substring(6).ToUpper())" -ForegroundColor Red
+                                $shoutClean = $text.Substring(6).ToUpper()
+                                write-host "[$ts] [$nick]: $shoutClean" -ForegroundColor Red
+                                Add-History $chatHistory $maxHistory "$nick`: $shoutClean"
                             } else {
                                 Play-Notify
                                 write-host "[$ts] [$nick]: $text" -ForegroundColor Yellow
+                                Add-History $chatHistory $maxHistory "$nick`: $text"
                             }
                             $statusText = $null
                         }
@@ -432,6 +469,7 @@ try {
                         $text = $currentInput.Substring(7)
                         $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|SHOUT:$text")
                         write-host "[$(Get-Timestamp)] [$myNick]: $($text.ToUpper())" -ForegroundColor Red
+                        Add-History $chatHistory $maxHistory "$myNick`: $($text.ToUpper())"
                     } elseif ($currentInput.StartsWith("/sendfile ")) {
                         $path = $currentInput.Substring(10).Trim().Trim('"')
                         if (Test-Path $path -PathType Leaf) {
@@ -460,6 +498,15 @@ try {
                         Stop-MusicLocal
                         $writer.WriteLine("MUSIC|STOP|")
                         write-host "* Music stopped *" -ForegroundColor Cyan
+                    } elseif ($currentInput.StartsWith("/ai ")) {
+                        $question = $currentInput.Substring(4)
+                        write-host "* Thinking... *" -ForegroundColor DarkGray
+                        $aiText = Invoke-AI $question $chatHistory
+                        if ($aiText -ne $null) {
+                            $writer.WriteLine("MSG|$(Get-Timestamp)|AI|$aiText")
+                            write-host "[$(Get-Timestamp)] [AI]: $aiText" -ForegroundColor Magenta
+                            Add-History $chatHistory $maxHistory "AI: $aiText"
+                        }
                     } elseif ($currentInput -eq "/help") {
                         Show-Help
                     } elseif ($currentInput -eq "/tray") {
@@ -472,6 +519,7 @@ try {
                     } else {
                         $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|$currentInput")
                         write-host "[$(Get-Timestamp)] [$myNick]: $currentInput" -ForegroundColor Green
+                        Add-History $chatHistory $maxHistory "$myNick`: $currentInput"
                     }
 
                     $currentInput = ""
