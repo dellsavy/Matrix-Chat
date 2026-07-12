@@ -7,10 +7,11 @@ $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concaten
 $notifySoundPath = "C:\Users\Administrator\Desktop\Code shit\Chat w Dale's computer\Matrix Chat\V2\ReceivedFiles\Windows Proximity Notification.wav"
 
 # --- Auto-update config ---
-$scriptVersion = "2.4.0"
+$scriptVersion = "2.5.0"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/client.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
+$updateNoticePath = Join-Path $env:TEMP "matrixchat_update_notice_client.txt"
 
 Add-Type -Name Win32 -Namespace ConsoleUtils -MemberDefinition @"
 [DllImport("user32.dll")]
@@ -107,6 +108,30 @@ function Open-IfMedia {
     }
 }
 
+# --- Shared music playback ---
+Add-Type -AssemblyName PresentationCore
+$audioExtensions = @(".mp3", ".wav", ".flac", ".ogg", ".m4a", ".wma")
+$global:musicPlayer = New-Object System.Windows.Media.MediaPlayer
+
+function Start-MusicLocal {
+    param([string]$path)
+    try {
+        $global:musicPlayer.Open([Uri]::new($path))
+        $global:musicPlayer.Play()
+        write-host "* Now playing: $([IO.Path]::GetFileName($path)) *" -ForegroundColor Cyan
+    } catch {
+        write-host "* Couldn't play '$path': $($_.Exception.Message) *" -ForegroundColor Red
+    }
+}
+
+function Pause-MusicLocal {
+    try { $global:musicPlayer.Pause() } catch { }
+}
+
+function Stop-MusicLocal {
+    try { $global:musicPlayer.Stop() } catch { }
+}
+
 function Auto-Update {
     try {
         $remote = Invoke-RestMethod -Uri $versionCheckUrl -TimeoutSec 5
@@ -133,6 +158,7 @@ function Auto-Update {
         $backupPath = "$selfPath.bak"
         Copy-Item -Path $selfPath -Destination $backupPath -Force
         Set-Content -Path $selfPath -Value $newCode -Encoding UTF8
+        Set-Content -Path $updateNoticePath -Value "$remoteVersion|$note" -Encoding UTF8
 
         write-host "* Updated to v$remoteVersion. Restarting... *" -ForegroundColor Green
         Start-Sleep -Seconds 1
@@ -145,11 +171,27 @@ function Auto-Update {
     }
 }
 
+function Show-UpdateNoticeIfAny {
+    if (Test-Path $updateNoticePath) {
+        $content = (Get-Content $updateNoticePath -Raw).Trim()
+        $parts = $content -split '\|', 2
+        $v = $parts[0].Trim()
+        $note = if ($parts.Length -gt 1) { $parts[1].Trim() } else { "" }
+        write-host "==================================================" -ForegroundColor Magenta
+        write-host "  UPDATED TO v$v" -ForegroundColor Magenta
+        if ($note) { write-host "  Changes: $note" -ForegroundColor Magenta }
+        write-host "==================================================" -ForegroundColor Magenta
+        write-host ""
+        Remove-Item $updateNoticePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Clear-Host
 write-host "==================================================" -ForegroundColor Cyan
 write-host "=== CONNECTING TO DALE AT $serverIP... ===" -ForegroundColor Cyan
 write-host "==================================================" -ForegroundColor Cyan
 if (Auto-Update) { exit }
+Show-UpdateNoticeIfAny
 
 function Get-Timestamp { (Get-Date).ToString("HH:mm") }
 function Get-Prefix { "[$myNick]: " }
@@ -191,6 +233,9 @@ function Show-Help {
     write-host "  /nick <name>     - change your display name" -ForegroundColor DarkGray
     write-host "  /shout <msg>     - send a loud message" -ForegroundColor DarkGray
     write-host "  /sendfile <path> - send a file (under 15MB)" -ForegroundColor DarkGray
+    write-host "  /playmusic <path>- play a song for both of you (send it first)" -ForegroundColor DarkGray
+    write-host "  /pause           - pause the shared music" -ForegroundColor DarkGray
+    write-host "  /stop            - stop the shared music" -ForegroundColor DarkGray
     write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
     write-host "  /tray            - minimize to system tray" -ForegroundColor DarkGray
     write-host "  /help            - show this list" -ForegroundColor DarkGray
@@ -302,6 +347,27 @@ try {
                     }
                     $statusText = $null
                     Redraw-InputLine $currentInput $statusText
+                } elseif ($type -eq "MUSIC") {
+                    Clear-CurrentLine
+                    $action = $parts[1]
+                    if ($action -eq "PLAY") {
+                        $fname = $parts[2]
+                        $localPath = Join-Path $filesDir $fname
+                        if (Test-Path $localPath -PathType Leaf) {
+                            Start-MusicLocal $localPath
+                            write-host "* Dale started playing '$fname' *" -ForegroundColor Cyan
+                        } else {
+                            write-host "* Dale wants to play '$fname' but you don't have it - ask them to /sendfile it first *" -ForegroundColor Red
+                        }
+                    } elseif ($action -eq "PAUSE") {
+                        Pause-MusicLocal
+                        write-host "* Music paused (by Dale) *" -ForegroundColor Cyan
+                    } elseif ($action -eq "STOP") {
+                        Stop-MusicLocal
+                        write-host "* Music stopped (by Dale) *" -ForegroundColor Cyan
+                    }
+                    $statusText = $null
+                    Redraw-InputLine $currentInput $statusText
                 } else {
                     Clear-CurrentLine
                     switch ($type) {
@@ -361,6 +427,27 @@ try {
                         } else {
                             write-host "* File not found: $path *" -ForegroundColor Red
                         }
+                    } elseif ($currentInput.StartsWith("/playmusic ")) {
+                        $path = $currentInput.Substring(11).Trim().Trim('"')
+                        $ext = [IO.Path]::GetExtension($path).ToLower()
+                        if (-not (Test-Path $path -PathType Leaf)) {
+                            write-host "* File not found: $path *" -ForegroundColor Red
+                        } elseif ($audioExtensions -notcontains $ext) {
+                            write-host "* Not a supported audio file (mp3/wav/flac/ogg/m4a/wma) *" -ForegroundColor Red
+                        } else {
+                            $fname = [IO.Path]::GetFileName($path)
+                            Start-MusicLocal $path
+                            $writer.WriteLine("MUSIC|PLAY|$fname")
+                            write-host "* Tip: Dale needs this file already received via /sendfile to hear it too *" -ForegroundColor DarkGray
+                        }
+                    } elseif ($currentInput -eq "/pause") {
+                        Pause-MusicLocal
+                        $writer.WriteLine("MUSIC|PAUSE|")
+                        write-host "* Music paused *" -ForegroundColor Cyan
+                    } elseif ($currentInput -eq "/stop") {
+                        Stop-MusicLocal
+                        $writer.WriteLine("MUSIC|STOP|")
+                        write-host "* Music stopped *" -ForegroundColor Cyan
                     } elseif ($currentInput -eq "/help") {
                         Show-Help
                     } elseif ($currentInput -eq "/tray") {
