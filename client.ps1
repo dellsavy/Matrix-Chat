@@ -5,14 +5,18 @@ $filesDir = Join-Path $PSScriptRoot "ReceivedFiles"
 $maxFileSize = 15MB
 $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concatenate cleanly
 $notifySoundPath = "C:\Users\Administrator\Desktop\Code shit\Chat w Dale's computer\Matrix Chat\V2\ReceivedFiles\Windows Proximity Notification.wav"
-$geminiApiKey = "AQ.Ab8RN6Ixp05_VGmAY2zcFjgPWXyMubTOPOSm_noZ-taArQiKbg"
 
 # --- Auto-update config ---
-$scriptVersion = "2.5.1"
+$scriptVersion = "2.7.0"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/client.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
 $updateNoticePath = Join-Path $env:TEMP "matrixchat_update_notice_client.txt"
+
+# --- Gemini AI config ---
+# Key lives in a local, untracked file - NEVER commit this or paste it in the repo.
+$geminiKeyPath = Join-Path $PSScriptRoot "gemini_key.txt"
+$geminiModel = "gemini-2.5-flash"
 
 Add-Type -Name Win32 -Namespace ConsoleUtils -MemberDefinition @"
 [DllImport("user32.dll")]
@@ -109,6 +113,29 @@ function Open-IfMedia {
     }
 }
 
+function Ask-Gemini {
+    param([string]$question)
+    if (-not (Test-Path $geminiKeyPath)) {
+        write-host "* No Gemini API key set up. Create a file named 'gemini_key.txt' next to this script containing just your key. *" -ForegroundColor Red
+        return $null
+    }
+    $key = (Get-Content $geminiKeyPath -Raw).Trim()
+    if (-not $key) {
+        write-host "* gemini_key.txt is empty. Paste your API key inside it (no quotes). *" -ForegroundColor Red
+        return $null
+    }
+    try {
+        $bodyObj = @{ contents = @(@{ parts = @(@{ text = $question }) }) }
+        $body = $bodyObj | ConvertTo-Json -Depth 6
+        $uri = "https://generativelanguage.googleapis.com/v1beta/models/$geminiModel`:generateContent"
+        $resp = Invoke-RestMethod -Uri $uri -Method Post -Headers @{ "x-goog-api-key" = $key; "Content-Type" = "application/json" } -Body $body -TimeoutSec 30
+        return $resp.candidates[0].content.parts[0].text
+    } catch {
+        write-host "* AI request failed: $($_.Exception.Message) *" -ForegroundColor Red
+        return $null
+    }
+}
+
 # --- Shared music playback ---
 Add-Type -AssemblyName PresentationCore
 $audioExtensions = @(".mp3", ".wav", ".flac", ".ogg", ".m4a", ".wma")
@@ -133,33 +160,16 @@ function Stop-MusicLocal {
     try { $global:musicPlayer.Stop() } catch { }
 }
 
-function Invoke-AI {
-    param($question, $historyList)
-    if ($geminiApiKey -eq "") {
-        write-host "* Set your Gemini API key in the script first (`$geminiApiKey) *" -ForegroundColor Red
-        return $null
-    }
-    try {
-        $historyText = ($historyList -join "`n")
-        $prompt = "Here is the recent chat conversation for context:`n$historyText`n`nNow answer this question, keeping your answer concise (a few sentences unless asked for more):`n$question"
-        $uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$geminiApiKey"
-        $body = @{
-            contents = @(@{ parts = @(@{ text = $prompt }) })
-        } | ConvertTo-Json -Depth 10
-        $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "application/json" -Body $body
-        $text = $response.candidates[0].content.parts[0].text
-        $text = $text -replace "`r`n", " " -replace "`n", " "
-        return $text
-    } catch {
-        write-host "* AI request failed: $($_.Exception.Message) *" -ForegroundColor Red
-        return $null
-    }
-}
+# --- Rolling chat history, used as context for /ai ---
+$global:chatHistory = New-Object System.Collections.Generic.List[string]
+$chatHistoryMax = 30
 
-function Add-History {
-    param($historyList, $maxLen, $entry)
-    [void]$historyList.Add($entry)
-    while ($historyList.Count -gt $maxLen) { $historyList.RemoveAt(0) }
+function Add-ChatHistory {
+    param([string]$line)
+    $global:chatHistory.Add($line)
+    while ($global:chatHistory.Count -gt $chatHistoryMax) {
+        $global:chatHistory.RemoveAt(0)
+    }
 }
 
 function Auto-Update {
@@ -171,20 +181,6 @@ function Auto-Update {
         $note = if ($parts.Length -gt 1) { $parts[1].Trim() } else { "" }
 
         if (-not $remoteVersion -or $remoteVersion -eq $scriptVersion) { return $false }
-
-        # Loop guard: if we already restarted into this exact version once before,
-        # the downloaded file's internal $scriptVersion probably wasn't bumped to match.
-        # Refuse to update again to avoid spawning endless restart loops.
-        if (Test-Path $updateNoticePath) {
-            try {
-                $prevNotice = (Get-Content $updateNoticePath -Raw).Trim()
-                $prevVersion = ($prevNotice -split '\|', 2)[0].Trim()
-                if ($prevVersion -eq $remoteVersion) {
-                    write-host "* Update to v$remoteVersion was already applied but version mismatch persists - skipping to avoid a restart loop. Check `$scriptVersion inside the pushed file. *" -ForegroundColor DarkYellow
-                    return $false
-                }
-            } catch { }
-        }
 
         write-host "==================================================" -ForegroundColor Magenta
         write-host "  UPDATE FOUND: v$remoteVersion (you're on v$scriptVersion)" -ForegroundColor Magenta
@@ -289,7 +285,7 @@ function Show-Help {
     write-host "  /playmusic <path>- play a song for both of you (send it first)" -ForegroundColor DarkGray
     write-host "  /pause           - pause the shared music" -ForegroundColor DarkGray
     write-host "  /stop            - stop the shared music" -ForegroundColor DarkGray
-    write-host "  /ai <question>   - ask the AI, answer shows for both of you" -ForegroundColor DarkGray
+    write-host "  /ai <question>   - ask Gemini AI, both of you see the answer" -ForegroundColor DarkGray
     write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
     write-host "  /tray            - minimize to system tray" -ForegroundColor DarkGray
     write-host "  /help            - show this list" -ForegroundColor DarkGray
@@ -347,9 +343,6 @@ try {
     $typingActive = $false
     $statusText = $null
     Redraw-InputLine $currentInput $statusText
-
-    $chatHistory = New-Object System.Collections.ArrayList
-    $maxHistory = 30
 
     # File receive state
     $recvFileName = $null
@@ -426,6 +419,20 @@ try {
                     }
                     $statusText = $null
                     Redraw-InputLine $currentInput $statusText
+                } elseif ($type -eq "AI") {
+                    Clear-CurrentLine
+                    try {
+                        $q = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[1]))
+                        $a = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[2]))
+                        write-host "[Gemini] Dale asked: $q" -ForegroundColor DarkYellow
+                        write-host $a -ForegroundColor Yellow
+                        Add-ChatHistory "[Dale asked Gemini]: $q"
+                        Add-ChatHistory "[Gemini]: $a"
+                    } catch {
+                        write-host "* Couldn't read AI message *" -ForegroundColor Red
+                    }
+                    $statusText = $null
+                    Redraw-InputLine $currentInput $statusText
                 } else {
                     Clear-CurrentLine
                     switch ($type) {
@@ -433,13 +440,12 @@ try {
                             $ts = $parts[1]; $nick = $parts[2]; $text = $parts[3]
                             if ($text.StartsWith("SHOUT:")) {
                                 Play-Notify
-                                $shoutClean = $text.Substring(6).ToUpper()
-                                write-host "[$ts] [$nick]: $shoutClean" -ForegroundColor Red
-                                Add-History $chatHistory $maxHistory "$nick`: $shoutClean"
+                                write-host "[$ts] [$nick]: $($text.Substring(6).ToUpper())" -ForegroundColor Red
+                                Add-ChatHistory "[$nick]: $($text.Substring(6))"
                             } else {
                                 Play-Notify
                                 write-host "[$ts] [$nick]: $text" -ForegroundColor Cyan
-                                Add-History $chatHistory $maxHistory "$nick`: $text"
+                                Add-ChatHistory "[$nick]: $text"
                             }
                             $statusText = $null
                         }
@@ -481,7 +487,7 @@ try {
                         $text = $currentInput.Substring(7)
                         $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|SHOUT:$text")
                         write-host "[$(Get-Timestamp)] [$myNick]: $($text.ToUpper())" -ForegroundColor Red
-                        Add-History $chatHistory $maxHistory "$myNick`: $($text.ToUpper())"
+                        Add-ChatHistory "[$myNick]: $text"
                     } elseif ($currentInput.StartsWith("/sendfile ")) {
                         $path = $currentInput.Substring(10).Trim().Trim('"')
                         if (Test-Path $path -PathType Leaf) {
@@ -511,13 +517,27 @@ try {
                         $writer.WriteLine("MUSIC|STOP|")
                         write-host "* Music stopped *" -ForegroundColor Cyan
                     } elseif ($currentInput.StartsWith("/ai ")) {
-                        $question = $currentInput.Substring(4)
-                        write-host "* Thinking... *" -ForegroundColor DarkGray
-                        $aiText = Invoke-AI $question $chatHistory
-                        if ($aiText -ne $null) {
-                            $writer.WriteLine("MSG|$(Get-Timestamp)|AI|$aiText")
-                            write-host "[$(Get-Timestamp)] [AI]: $aiText" -ForegroundColor Magenta
-                            Add-History $chatHistory $maxHistory "AI: $aiText"
+                        $question = $currentInput.Substring(4).Trim()
+                        if ($question -eq "") {
+                            write-host "* Usage: /ai <question> *" -ForegroundColor Red
+                        } else {
+                            write-host "* Asking Gemini... *" -ForegroundColor DarkGray
+                            $historyText = if ($global:chatHistory.Count -gt 0) { $global:chatHistory -join "`n" } else { "" }
+                            $prompt = if ($historyText) {
+                                "You're a helpful AI joining a private two-person chat between Dale and Xore. Here's the recent conversation for context:`n$historyText`n`nNow answer this question naturally, using that context only if it's relevant:`n$question"
+                            } else {
+                                $question
+                            }
+                            $answer = Ask-Gemini $prompt
+                            if ($answer) {
+                                write-host "[Gemini]: " -NoNewline -ForegroundColor Yellow
+                                write-host $answer -ForegroundColor Yellow
+                                Add-ChatHistory "[$myNick asked Gemini]: $question"
+                                Add-ChatHistory "[Gemini]: $answer"
+                                $qB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($question))
+                                $aB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($answer))
+                                $writer.WriteLine("AI|$qB64|$aB64")
+                            }
                         }
                     } elseif ($currentInput -eq "/help") {
                         Show-Help
@@ -531,7 +551,7 @@ try {
                     } else {
                         $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|$currentInput")
                         write-host "[$(Get-Timestamp)] [$myNick]: $currentInput" -ForegroundColor Green
-                        Add-History $chatHistory $maxHistory "$myNick`: $currentInput"
+                        Add-ChatHistory "[$myNick]: $currentInput"
                     }
 
                     $currentInput = ""
