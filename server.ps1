@@ -6,7 +6,7 @@ $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concaten
 $notifySoundPath = "C:\Users\space\Desktop\Matrix Chat\ReceivedFiles\Windows Proximity Notification.wav"
 
 # --- Auto-update config ---
-$scriptVersion = "2.5.0"
+$scriptVersion = "2.5.1"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/server.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
@@ -170,10 +170,18 @@ function Auto-Update {
     }
 }
 
-function Show-UpdateNoticeIfAny {
+$global:pendingUpdateNotice = $null
+function Consume-UpdateNoticeIfAny {
     if (Test-Path $updateNoticePath) {
         $content = (Get-Content $updateNoticePath -Raw).Trim()
-        $parts = $content -split '\|', 2
+        $global:pendingUpdateNotice = $content
+        Remove-Item $updateNoticePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Print-UpdateNoticeIfAny {
+    if ($global:pendingUpdateNotice) {
+        $parts = $global:pendingUpdateNotice -split '\|', 2
         $v = $parts[0].Trim()
         $note = if ($parts.Length -gt 1) { $parts[1].Trim() } else { "" }
         write-host "==================================================" -ForegroundColor Magenta
@@ -181,7 +189,7 @@ function Show-UpdateNoticeIfAny {
         if ($note) { write-host "  Changes: $note" -ForegroundColor Magenta }
         write-host "==================================================" -ForegroundColor Magenta
         write-host ""
-        Remove-Item $updateNoticePath -Force -ErrorAction SilentlyContinue
+        $global:pendingUpdateNotice = $null
     }
 }
 
@@ -190,7 +198,8 @@ write-host "==================================================" -ForegroundColor
 write-host "=== WAITING FOR XORE TO CONNECT ON PORT $port ===" -ForegroundColor Cyan
 write-host "==================================================" -ForegroundColor Cyan
 if (Auto-Update) { exit }
-Show-UpdateNoticeIfAny
+Consume-UpdateNoticeIfAny
+Print-UpdateNoticeIfAny
 
 function Get-Timestamp { (Get-Date).ToString("HH:mm") }
 function Get-Prefix { "[$myNick]: " }
@@ -289,6 +298,7 @@ try {
     write-host "===       XORE CONNECTED! CHAT ACTIVE          ===" -ForegroundColor Green
     write-host "==================================================" -ForegroundColor Green
     write-host "Start typing! Type /help to see commands.`n"
+    Print-UpdateNoticeIfAny
 
     $currentInput = ""
     $typingActive = $false
