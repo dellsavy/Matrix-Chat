@@ -171,6 +171,20 @@ function Auto-Update {
 
         if (-not $remoteVersion -or $remoteVersion -eq $scriptVersion) { return $false }
 
+        # Loop guard: if we already restarted into this exact version once before,
+        # the downloaded file's internal $scriptVersion probably wasn't bumped to match.
+        # Refuse to update again to avoid spawning endless restart loops.
+        if (Test-Path $updateNoticePath) {
+            try {
+                $prevNotice = (Get-Content $updateNoticePath -Raw).Trim()
+                $prevVersion = ($prevNotice -split '\|', 2)[0].Trim()
+                if ($prevVersion -eq $remoteVersion) {
+                    write-host "* Update to v$remoteVersion was already applied but version mismatch persists - skipping to avoid a restart loop. Check `$scriptVersion inside the pushed file. *" -ForegroundColor DarkYellow
+                    return $false
+                }
+            } catch { }
+        }
+
         write-host "==================================================" -ForegroundColor Magenta
         write-host "  UPDATE FOUND: v$remoteVersion (you're on v$scriptVersion)" -ForegroundColor Magenta
         if ($note) { write-host "  Changes: $note" -ForegroundColor Magenta }
