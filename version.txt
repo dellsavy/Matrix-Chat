@@ -1,1 +1,1 @@
-2.5.1|Fixed update banner disappearing before connection screen. VRUHHHHHHHHHHH
+2.5.2|Added /ai command - ask Gemini anything right in chat, answer shows for both of you. HOLEEE
