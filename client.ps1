@@ -6,8 +6,25 @@ $maxFileSize = 15MB
 $chunkSize = 65535 # 64KB-ish, must be a multiple of 3 so base64 chunks concatenate cleanly
 $notifySoundPath = "C:\Users\Administrator\Desktop\Code shit\Chat w Dale's computer\Matrix Chat\V2\ReceivedFiles\Windows Proximity Notification.wav"
 
+# --- Color scheme: true black background, amber for what you send, green for what you receive ---
+try { $Host.UI.RawUI.BackgroundColor = "Black" } catch { }
+$ansiEsc = [char]27
+$colorSenderText = "$ansiEsc[38;2;255;176;0m"   # #FFB000 Phosphor Amber
+$colorReceiverText = "$ansiEsc[38;2;0;255;102m" # #00FF66 Classic Terminal Green
+$colorReset = "$ansiEsc[0m"
+
+function Write-SenderLine {
+    param([string]$text)
+    Write-Host "$colorSenderText$text$colorReset"
+}
+
+function Write-ReceiverLine {
+    param([string]$text)
+    Write-Host "$colorReceiverText$text$colorReset"
+}
+
 # --- Auto-update config ---
-$scriptVersion = "2.7.0"
+$scriptVersion = "2.9.0"
 $versionCheckUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/version.txt"
 $scriptDownloadUrl = "https://raw.githubusercontent.com/dellsavy/Matrix-Chat/refs/heads/main/client.ps1"
 $repoUrl = "https://github.com/dellsavy/Matrix-Chat"
@@ -16,7 +33,19 @@ $updateNoticePath = Join-Path $env:TEMP "matrixchat_update_notice_client.txt"
 # --- Gemini AI config ---
 # Key lives in a local, untracked file - NEVER commit this or paste it in the repo.
 $geminiKeyPath = Join-Path $PSScriptRoot "gemini_key.txt"
-$geminiModel = "gemini-2.5-flash"
+$geminiModel = "gemini-flash-latest"
+
+# --- Recent update history, shown with /updates ---
+$recentUpdates = @(
+    "v2.9.0 - Added /drop drag-and-drop file sending, /update command, amber/green color scheme",
+    "v2.7.1 - Fixed 404 error, switched to gemini-flash-latest",
+    "v2.7.0 - Added chat-history context to /ai",
+    "v2.6.0 - Added /ai command to ask Gemini AI",
+    "v2.5.1 - Fixed update banner disappearing too fast",
+    "v2.5.0 - Added /playmusic, /pause, /stop for shared music",
+    "v2.4.0 - Added /tray command to minimize to system tray",
+    "v2.3.0 - Auto-open received images, videos, and audio"
+)
 
 Add-Type -Name Win32 -Namespace ConsoleUtils -MemberDefinition @"
 [DllImport("user32.dll")]
@@ -80,6 +109,39 @@ function Restore-Console {
     [ConsoleUtils.Win32]::SetForegroundWindow($hwnd) | Out-Null
     $global:trayIcon.Visible = $false
 }
+
+# --- Drag-and-drop file sending ---
+$global:dropForm = New-Object System.Windows.Forms.Form
+$global:dropForm.Text = "Drop file to send"
+$global:dropForm.Size = New-Object System.Drawing.Size(220, 100)
+$global:dropForm.TopMost = $true
+$global:dropForm.AllowDrop = $true
+$global:dropForm.StartPosition = "Manual"
+$global:dropForm.Location = New-Object System.Drawing.Point(20, 20)
+
+$dropLabel = New-Object System.Windows.Forms.Label
+$dropLabel.Text = "Drag a file here to send it"
+$dropLabel.Dock = "Fill"
+$dropLabel.TextAlign = "MiddleCenter"
+$global:dropForm.Controls.Add($dropLabel)
+
+$global:dropForm.add_DragEnter({
+    param($sender, $e)
+    if ($e.Data.GetDataPresent([Windows.Forms.DataFormats]::FileDrop)) {
+        $e.Effect = [Windows.Forms.DragDropEffects]::Copy
+    }
+})
+
+$global:dropForm.add_DragDrop({
+    param($sender, $e)
+    $droppedFiles = $e.Data.GetData([Windows.Forms.DataFormats]::FileDrop)
+    foreach ($f in $droppedFiles) {
+        if ((Test-Path $f -PathType Leaf) -and $global:writer) {
+            write-host "* Dropped file detected, sending: $f *" -ForegroundColor Cyan
+            Send-FileChunked $global:writer $f
+        }
+    }
+})
 
 function Play-Notify {
     if (Test-IsWindowFocused) { return }
@@ -286,6 +348,9 @@ function Show-Help {
     write-host "  /pause           - pause the shared music" -ForegroundColor DarkGray
     write-host "  /stop            - stop the shared music" -ForegroundColor DarkGray
     write-host "  /ai <question>   - ask Gemini AI, both of you see the answer" -ForegroundColor DarkGray
+    write-host "  /updates         - show recent update history" -ForegroundColor DarkGray
+    write-host "  /update          - show only the latest update" -ForegroundColor DarkGray
+    write-host "  /drop            - open a window to drag-and-drop a file to send" -ForegroundColor DarkGray
     write-host "  /clear           - clear your screen" -ForegroundColor DarkGray
     write-host "  /tray            - minimize to system tray" -ForegroundColor DarkGray
     write-host "  /help            - show this list" -ForegroundColor DarkGray
@@ -330,6 +395,7 @@ try {
     $stream = $client.GetStream()
     $writer = [System.IO.StreamWriter]::new($stream)
     $writer.AutoFlush = $true
+    $global:writer = $writer
     $reader = [System.IO.StreamReader]::new($stream)
 
     Clear-Host
@@ -444,7 +510,7 @@ try {
                                 Add-ChatHistory "[$nick]: $($text.Substring(6))"
                             } else {
                                 Play-Notify
-                                write-host "[$ts] [$nick]: $text" -ForegroundColor Cyan
+                                Write-ReceiverLine "[$ts] [$nick]: $text"
                                 Add-ChatHistory "[$nick]: $text"
                             }
                             $statusText = $null
@@ -539,6 +605,21 @@ try {
                                 $writer.WriteLine("AI|$qB64|$aB64")
                             }
                         }
+                    } elseif ($currentInput -eq "/updates") {
+                        write-host ""
+                        write-host "Recent updates:" -ForegroundColor DarkGray
+                        foreach ($update in $recentUpdates) {
+                            write-host "  $update" -ForegroundColor DarkGray
+                        }
+                        write-host ""
+                    } elseif ($currentInput -eq "/update") {
+                        write-host ""
+                        write-host "Latest update:" -ForegroundColor DarkGray
+                        write-host "  $($recentUpdates[0])" -ForegroundColor DarkGray
+                        write-host ""
+                    } elseif ($currentInput -eq "/drop") {
+                        $global:dropForm.Show()
+                        write-host "* Drop window opened - drag a file onto it to send *" -ForegroundColor Cyan
                     } elseif ($currentInput -eq "/help") {
                         Show-Help
                     } elseif ($currentInput -eq "/tray") {
@@ -550,7 +631,7 @@ try {
                         write-host "==================================================" -ForegroundColor Green
                     } else {
                         $writer.WriteLine("MSG|$(Get-Timestamp)|$myNick|$currentInput")
-                        write-host "[$(Get-Timestamp)] [$myNick]: $currentInput" -ForegroundColor Green
+                        Write-SenderLine "[$(Get-Timestamp)] [$myNick]: $currentInput"
                         Add-ChatHistory "[$myNick]: $currentInput"
                     }
 
