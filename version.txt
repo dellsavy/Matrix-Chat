@@ -1,1 +1,1 @@
-2.7.0|Added chat-history context to /ai so Gemini can follow the conversation. ILIKEBOYShehe
+2.9.0|Added /drop drag-and-drop file sending, /update command, amber/green color scheme #miroislikeboy
